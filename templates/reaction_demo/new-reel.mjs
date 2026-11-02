@@ -26,7 +26,8 @@
  * - --render: render renders/<name>.mp4 after generating (--draft for fast preview quality).
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, extname, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -135,7 +136,7 @@ function stage(path, label, kind = "video") {
   const target = join("assets", basename(resolved));
   if (!existsSync(join(ROOT, target))) {
     mkdirSync(join(ROOT, "assets"), { recursive: true });
-    execFileSync("cp", [resolved, join(ROOT, target)]);
+    copyFileSync(resolved, join(ROOT, target));
   }
   return target;
 }
@@ -446,11 +447,31 @@ console.log(`✔ compositions/${name}.html  (${reactionSecs}s reaction @${trim}s
 console.log(`✔ host-${name}.html`);
 
 if (flag("render")) {
-  const args = ["hyperframes", "render", "-c", `host-${name}.html`, "-o", `renders/${name}.mp4`];
+  const isWin = process.platform === "win32";
+  const finalOut = join(ROOT, "renders", `${name}.mp4`);
+  mkdirSync(dirname(finalOut), { recursive: true });
+  // Windows: the CLI's temp files next to the output can exceed MAX_PATH (260 chars)
+  // in deep project paths, so render into a short temp dir and copy back
+  const tmpDir = isWin ? mkdtempSync(join(tmpdir(), "hf-")) : null;
+  const out = tmpDir ? join(tmpDir, `${name}.mp4`) : `renders/${name}.mp4`;
+  const args = ["hyperframes", "render", "-c", `host-${name}.html`, "-o", out];
   if (flag("draft")) args.push("--quality", "draft");
   console.log(`Rendering renders/${name}.mp4 …`);
-  const r = spawnSync("npx", args, { cwd: ROOT, stdio: "inherit" });
-  process.exit(r.status ?? 0);
+  // npx is npx.cmd on Windows, which can only be spawned through a shell
+  const r = spawnSync("npx", isWin ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args, {
+    cwd: ROOT,
+    stdio: "inherit",
+    shell: isWin,
+  });
+  if (r.error) {
+    console.error(`Render failed to start: ${r.error.message}`);
+    process.exit(1);
+  }
+  if (tmpDir) {
+    if (r.status === 0) copyFileSync(out, finalOut);
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+  process.exit(r.status ?? 1);
 } else {
   console.log(`Next: npx hyperframes render -c host-${name}.html -o renders/${name}.mp4`);
 }
